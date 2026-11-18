@@ -8,11 +8,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from logsentinel.auth import can, get_role  # noqa: E402
 from logsentinel.parser import parse_lines  # noqa: E402
 
 st.set_page_config(page_title="LogSentinel", page_icon="🛡️", layout="wide")
 st.title("🛡️ LogSentinel")
+
+
+def _role_lists() -> tuple[list[str], list[str]]:
+    try:
+        roles = st.secrets["roles"]
+        return list(roles.get("admins", [])), list(roles.get("analysts", []))
+    except Exception:
+        return [], []
+
+
+if not getattr(st.user, "is_logged_in", False):
+    st.info("Please sign in to continue.")
+    st.button("Log in with Google", on_click=st.login, args=["google"])
+    st.stop()
+
+admins, analysts = _role_lists()
+role = get_role(st.user.email, admins, analysts)
+
+with st.sidebar:
+    st.write(f"Signed in as **{st.user.email}**")
+    st.write(f"Role: `{role}`")
+    st.button("Log out", on_click=st.logout)
+
 st.caption("Upload a web server access log to parse it.")
+
+if not can(role, "upload_logs"):
+    st.warning("Your role cannot upload logs. Ask an admin for analyst access.")
+    st.stop()
 
 uploaded = st.file_uploader("Nginx/Apache combined-format log file", type=["log", "txt"])
 
