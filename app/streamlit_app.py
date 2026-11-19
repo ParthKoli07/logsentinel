@@ -36,6 +36,16 @@ with st.sidebar:
     st.write(f"Role: `{role}`")
     st.button("Log out", on_click=st.logout)
 
+    st.divider()
+    try:
+        from logsentinel.db import check_connection, get_client
+
+        sb_client = get_client(st.secrets["supabase"]["url"], st.secrets["supabase"]["anon_key"])
+        ok, msg = check_connection(sb_client)
+        st.write("Database:", "🟢 " + msg if ok else "🔴 " + msg)
+    except Exception as exc:
+        st.write("Database: 🔴", str(exc))
+
 st.caption("Upload a web server access log to parse it.")
 
 if not can(role, "upload_logs"):
