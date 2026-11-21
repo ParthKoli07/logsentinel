@@ -61,6 +61,13 @@ if uploaded is None:
 text = uploaded.getvalue().decode("utf-8", errors="replace")
 entries, malformed = parse_lines(text.splitlines())
 
+if entries and can(role, "upload_logs"):
+    if st.button("Save this batch to the database"):
+        from logsentinel.storage import save_batch
+
+        batch_id = save_batch(sb_client, st.user.email, uploaded.name, entries, malformed)
+        st.success(f"Saved batch {batch_id}")
+
 col1, col2 = st.columns(2)
 col1.metric("Parsed lines", len(entries))
 col2.metric("Malformed lines", malformed)
