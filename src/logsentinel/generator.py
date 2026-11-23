@@ -7,6 +7,7 @@ attack patterns, for testing detectors and measuring precision/recall.
 from __future__ import annotations
 
 import random
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -88,7 +89,8 @@ def generate_sqli(base_time: datetime, rng: random.Random) -> list[LabeledLine]:
     lines = []
     for i, suffix in enumerate(_SQLI_SUFFIXES):
         ts = _timestamp(base_time, i)
-        path = f"/products?id=1%20{suffix}"
+        encoded_suffix = urllib.parse.quote(suffix, safe="")
+        path = f"/products?id=1{encoded_suffix}"
         line = _format_line(ip, ts, "GET", path, 500, 512, agent)
         lines.append(LabeledLine(line, "sqli", ip))
     return lines
