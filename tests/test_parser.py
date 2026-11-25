@@ -38,3 +38,20 @@ def test_parse_lines_counts_malformed_and_skips_blank():
     entries, malformed = parse_lines([GOOD, "", "garbage", GOOD])
     assert len(entries) == 2
     assert malformed == 1
+
+def test_nonnumeric_size_is_malformed_not_a_crash():
+    line = '10.0.0.5 - - [10/Oct/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 abc "-" "-"'
+    assert parse_line(line) is None
+
+
+def test_nonnumeric_status_is_malformed_not_a_crash():
+    line = '10.0.0.6 - - [10/Oct/2026:13:55:36 +0000] "GET / HTTP/1.1" abc 100 "-" "-"'
+    assert parse_line(line) is None
+
+
+def test_parse_lines_counts_rather_than_crashes_on_bad_size():
+    good = GOOD
+    bad = '10.0.0.7 - - [10/Oct/2026:13:55:36 +0000] "GET / HTTP/1.1" 200 notanumber "-" "-"'
+    entries, malformed = parse_lines([good, bad])
+    assert len(entries) == 1
+    assert malformed == 1

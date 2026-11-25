@@ -2,6 +2,7 @@ from logsentinel.evaluation import (
     evaluate_hybrid,
     evaluate_ml,
     evaluate_rules,
+    evaluate_rules_combined,
     false_alert_rate_per_1000,
     run_full_evaluation,
     train_baseline,
@@ -31,24 +32,48 @@ def test_rules_have_no_false_positives_on_normal_traffic():
         assert metrics.false_positives == 0
 
 
-def test_ml_is_trained_on_an_independent_baseline_not_the_test_batch():
-    """The whole point of train_baseline: it must not depend on the batch
-    being evaluated, so training it twice with the same seed, regardless of
-    which test batch is later scored, gives an identical model."""
-    model_a = train_baseline(seed=1000)
-    model_b = train_baseline(seed=1000)
-    entries, _ = _dataset(seed=1)
-    other_entries, _ = _dataset(seed=2)
+def test_baseline_seed_cannot_collide_with_a_plain_int_test_seed():
+    """Even if a test fixture happens to use the exact same integer (1000)
+    as the baseline's default seed, the baseline's composite-keyed RNG must
+    produce DIFFERENT underlying traffic, not the same requests replayed
+    with different timestamps."""
+    import random
+    from datetime import datetime, timezone
 
-    from logsentinel.detection.features import extract_features
+    from logsentinel.generator import generate_normal_traffic
 
-    features_a = extract_features(entries)
-    features_b = extract_features(other_entries)
-    # Same model, scored against two different batches, should not error and
-    # should be the literal same fitted model (not retrained per batch).
-    assert model_a.get_params() == model_b.get_params()
-    assert len(features_a) > 0
-    assert len(features_b) > 0
+    baseline_rng = random.Random("logsentinel-baseline-v1:1000")
+    baseline_lines = generate_normal_traffic(
+        50, datetime(2026, 1, 1, tzinfo=timezone.utc), baseline_rng
+    )
+
+    colliding_rng = random.Random(1000)  # a caller naively picking seed=1000
+    test_lines = generate_normal_traffic(
+        50, datetime(2026, 6, 1, tzinfo=timezone.utc), colliding_rng
+    )
+
+    # Compare the request line *content* ignoring the timestamp bracket,
+    # since that's the part that would differ even in the leaky old scheme.
+    def _strip_timestamp(line: str) -> str:
+        return line.split("]", 1)[1] if "]" in line else line
+
+    baseline_bodies = {_strip_timestamp(ll.line) for ll in baseline_lines}
+    test_bodies = {_strip_timestamp(ll.line) for ll in test_lines}
+
+    overlap = baseline_bodies & test_bodies
+    assert len(overlap) < len(baseline_bodies) * 0.5, (
+        "baseline traffic overlaps too heavily with a colliding plain-int "
+        "seeded test fixture; composite seeding did not prevent reuse"
+    )
+
+
+def test_rules_combined_matches_or_exceeds_any_single_rule_type():
+    entries, lines = _dataset()
+    combined = evaluate_rules_combined(entries, lines)
+    per_type = evaluate_rules(entries, lines)
+
+    best_single_type_recall = max(m.recall for m in per_type.values())
+    assert combined.recall >= best_single_type_recall
 
 
 def test_ml_detects_at_least_some_attacker_ips():
@@ -71,7 +96,9 @@ def test_hybrid_recall_is_at_least_as_good_as_rules_alone():
 def test_run_full_evaluation_returns_all_three_approaches_and_parse_coverage():
     lines = generate_dataset(normal_count=30, seed=9)
     results = run_full_evaluation(lines)
-    assert set(results.keys()) == {"rules", "ml", "hybrid", "parsed_lines", "malformed_lines"}
+    assert set(results.keys()) == {
+        "rules", "rules_combined", "ml", "hybrid", "parsed_lines", "malformed_lines"
+    }
     assert set(results["rules"].keys()) == {"brute_force", "scan", "sqli"}
     assert results["parsed_lines"] > 0
     assert results["malformed_lines"] == 0

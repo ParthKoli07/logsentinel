@@ -49,7 +49,12 @@ def parse_line(line: str) -> LogEntry | None:
         method, path = parts[0], parts[1]
         protocol = parts[2] if len(parts) > 2 else None
 
-    size = 0 if match["size"] == "-" else int(match["size"])
+    try:
+        size = 0 if match["size"] == "-" else int(match["size"])
+        status = int(match["status"])
+    except ValueError:
+        return None
+
     return LogEntry(
         ip=match["ip"],
         user=_dash_to_none(match["user"]),
@@ -57,7 +62,7 @@ def parse_line(line: str) -> LogEntry | None:
         method=method,
         path=path,
         protocol=protocol,
-        status=int(match["status"]),
+        status=status,
         size=size,
         referrer=_dash_to_none(match["referrer"]),
         user_agent=_dash_to_none(match["agent"]),

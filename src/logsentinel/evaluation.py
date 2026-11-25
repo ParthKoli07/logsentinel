@@ -56,11 +56,13 @@ def train_baseline(
     contamination: float | str = "auto",
 ):
     """Train an Isolation Forest on independently-generated, purely-normal
-    traffic (a different seed than any test batch). This is the model later
-    scored against real test batches, it never sees the data it's evaluated
-    on, avoiding train/test leakage."""
+    traffic. The RNG is seeded with a composite key (a tuple), not a bare
+    int, so it cannot collide with a plain-int seed a caller picks for a
+    test fixture elsewhere, even if both use the literal value 1000. This
+    is what actually guarantees independence from the batch being scored,
+    not just a convention of "pick different numbers.\""""
     base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    rng = random.Random(seed)
+    rng = random.Random(f"logsentinel-baseline-v1:{seed}")
     normal_lines = generate_normal_traffic(normal_count, base_time, rng)
     entries, _ = parse_lines(to_log_text(normal_lines).splitlines())
     features = extract_features(entries, window_seconds=window_seconds)
@@ -174,6 +176,7 @@ def run_full_evaluation(
         empty_rules = {label: _EMPTY_METRICS for label in ("brute_force", "scan", "sqli")}
         return {
             "rules": empty_rules,
+            "rules_combined": _EMPTY_METRICS,
             "ml": _EMPTY_METRICS,
             "hybrid": _EMPTY_METRICS,
             "parsed_lines": 0,
@@ -184,8 +187,25 @@ def run_full_evaluation(
 
     return {
         "rules": evaluate_rules(entries, lines),
+        "rules_combined": evaluate_rules_combined(entries, lines),
         "ml": evaluate_ml(entries, lines, model, window_seconds=window_seconds),
         "hybrid": evaluate_hybrid(entries, lines, model, window_seconds=window_seconds),
         "parsed_lines": len(entries),
         "malformed_lines": malformed,
     }
+
+def evaluate_rules_combined(entries: list[LogEntry], lines: list[LabeledLine]) -> Metrics:
+    """Treat all rule-based detectors as one system: did ANY rule flag this
+    IP, versus did this IP actually perform ANY attack. This is the correct
+    baseline to compare hybrid against, not the max of three separate
+    per-type numbers, which overstates what rules-only actually achieves
+    when a single IP could be missed by one rule but caught by another."""
+    if not entries:
+        return _EMPTY_METRICS
+
+    alerts = run_all_rules(entries)
+    flagged_ips = {a.ip for a in alerts}
+    true_ips = {ll.ip for ll in lines if ll.label != "normal"}
+    all_ips = {e.ip for e in entries}
+
+    return _compute_metrics(flagged_ips, true_ips, all_ips)

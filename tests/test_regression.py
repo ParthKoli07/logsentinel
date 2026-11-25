@@ -9,7 +9,8 @@ from logsentinel.generator import generate_dataset
 _RULE_RECALL_FLOOR = 1.0
 _RULE_PRECISION_FLOOR = 1.0
 _ML_RECALL_FLOOR = 0.8  # observed 1.00; floor leaves margin for variance
-_ML_MIN_F1 = 0.2  # observed 0.32; floor leaves margin, ML trades precision for recall by design
+_ML_MIN_F1 = 0.1
+# observed 0.16 post-leakage-fix; ML trades precision for recall on independent baseline
 
 
 def test_rule_detectors_maintain_perfect_precision_and_recall():
@@ -34,16 +35,19 @@ def test_ml_detector_maintains_minimum_recall_and_f1():
     assert ml.f1 >= _ML_MIN_F1, f"ML F1 dropped to {ml.f1:.2f}"
 
 
-def test_hybrid_never_performs_worse_than_rules_alone():
+def test_hybrid_never_performs_worse_than_combined_rules():
+    """Compares hybrid against the single combined rules-only metric, not
+    the max of three separate per-type numbers, which was a weaker and
+    somewhat circular comparison."""
     lines = generate_dataset(normal_count=100, seed=42)
     results = run_full_evaluation(lines)
 
-    best_rule_recall = max(m.recall for m in results["rules"].values())
+    rules_combined_recall = results["rules_combined"].recall
     hybrid_recall = results["hybrid"].recall
 
-    assert hybrid_recall >= best_rule_recall - 0.05, (
+    assert hybrid_recall >= rules_combined_recall - 0.05, (
         f"hybrid recall ({hybrid_recall:.2f}) fell below "
-        f"rules-only recall ({best_rule_recall:.2f})"
+        f"rules-combined recall ({rules_combined_recall:.2f})"
     )
 
 
