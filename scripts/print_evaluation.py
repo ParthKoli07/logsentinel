@@ -11,11 +11,14 @@ from logsentinel.generator import generate_dataset
 lines = generate_dataset(normal_count=100, seed=42)
 results = run_full_evaluation(lines)
 
+print(f"Parsed lines: {results['parsed_lines']}, malformed: {results['malformed_lines']}")
+print()
+
 print("--- Rules (per attack type) ---")
 for attack, m in results["rules"].items():
     print(f"{attack:15s} P={m.precision:.2f} R={m.recall:.2f} F1={m.f1:.2f}")
 
-print("--- ML (any anomaly) ---")
+print("--- ML (any anomaly, trained on independent baseline) ---")
 m = results["ml"]
 print(f"{'ml':15s} P={m.precision:.2f} R={m.recall:.2f} F1={m.f1:.2f}")
 
