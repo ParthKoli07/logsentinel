@@ -63,3 +63,34 @@ def test_sqli_lines_contain_injection_pattern():
     lines = generate_sqli(datetime(2026, 1, 1, tzinfo=timezone.utc), rng)
     assert all("sqli" == ll.label for ll in lines)
     assert any("UNION" in ll.line or "OR 1=1" in ll.line or "DROP" in ll.line for ll in lines)
+
+def test_dataset_with_incidents_returns_valid_time_spans():
+    from logsentinel.generator import generate_dataset_with_incidents
+
+    lines, incidents = generate_dataset_with_incidents(normal_count=30, seed=1)
+    assert len(incidents) == 7  # 2 brute_force + 2 scan + 2 sqli + 1 mixed-activity scan
+    for inc in incidents:
+        assert inc.start < inc.end
+
+
+def test_benign_login_failures_are_labeled_normal():
+    import random
+    from datetime import datetime, timezone
+
+    from logsentinel.generator import generate_benign_login_failures
+
+    rng = random.Random(1)
+    lines = generate_benign_login_failures(datetime(2026, 1, 1, tzinfo=timezone.utc), rng)
+    assert all(ll.label == "normal" for ll in lines)
+    assert len(lines) == 2
+
+
+def test_mixed_activity_ip_appears_in_both_normal_and_attack_lines():
+    from logsentinel.generator import generate_dataset_with_incidents
+
+    lines, incidents = generate_dataset_with_incidents(normal_count=30, seed=1)
+    scan_incident_ips = {inc.ip for inc in incidents if inc.label == "scan"}
+    # At least one scan IP should also have a "normal" line (the mixed case).
+    assert any(
+        any(ll.ip == ip and ll.label == "normal" for ll in lines) for ip in scan_incident_ips
+    )

@@ -61,3 +61,48 @@ def test_brute_force_below_threshold_is_not_flagged():
     lines = generate_brute_force(datetime(2026, 1, 1, tzinfo=timezone.utc), rng, attempts=3)
     entries, _ = parse_lines(to_log_text(lines).splitlines())
     assert detect_brute_force(entries, threshold=5) == []
+
+
+def test_two_separated_brute_force_bursts_from_same_ip_yield_two_alerts():
+    import random
+    from datetime import datetime, timezone
+
+    from logsentinel.generator import generate_brute_force
+
+    rng = random.Random(3)
+    ip_lines_1 = generate_brute_force(datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc), rng)
+    # Force the same IP for the second burst by reusing its generated IP.
+    ip = ip_lines_1[0].ip
+    rng2 = random.Random(3)
+    ip_lines_2 = generate_brute_force(datetime(2026, 1, 1, 9, 30, tzinfo=timezone.utc), rng2)
+
+    all_lines = ip_lines_1 + ip_lines_2
+    entries, _ = parse_lines(to_log_text(all_lines).splitlines())
+    alerts = detect_brute_force(entries, window_seconds=600)
+
+    same_ip_alerts = [a for a in alerts if a.ip == ip]
+    assert len(same_ip_alerts) == 2
+
+
+def test_benign_login_failures_do_not_trigger_brute_force():
+    import random
+    from datetime import datetime, timezone
+
+    from logsentinel.generator import generate_benign_login_failures
+
+    rng = random.Random(5)
+    lines = generate_benign_login_failures(datetime(2026, 1, 1, tzinfo=timezone.utc), rng)
+    entries, _ = parse_lines(to_log_text(lines).splitlines())
+    assert detect_brute_force(entries) == []
+
+
+def test_benign_traffic_burst_does_not_trigger_any_rule():
+    import random
+    from datetime import datetime, timezone
+
+    from logsentinel.generator import generate_benign_traffic_burst
+
+    rng = random.Random(6)
+    lines = generate_benign_traffic_burst(datetime(2026, 1, 1, tzinfo=timezone.utc), rng)
+    entries, _ = parse_lines(to_log_text(lines).splitlines())
+    assert run_all_rules(entries) == []

@@ -11,6 +11,44 @@ _RULE_PRECISION_FLOOR = 1.0
 _ML_RECALL_FLOOR = 0.8  # observed 1.00; floor leaves margin for variance
 _ML_MIN_F1 = 0.1
 # observed 0.16 post-leakage-fix; ML trades precision for recall on independent baseline
+_ML_THRESHOLD = -0.10
+_ML_THRESHOLD_FALSE_ALERT_CEILING = 150.0  # per 1000 benign windows; observed ~75
+_ML_THRESHOLD_RECALL_FLOOR = 1.0
+
+
+def test_calibrated_threshold_keeps_false_alerts_low_on_held_out_benign_data():
+    import random
+    from datetime import datetime, timezone
+
+    from logsentinel.evaluation import false_alert_rate_per_1000, train_baseline
+    from logsentinel.generator import generate_normal_traffic
+
+    model = train_baseline(seed=1000)
+    rng = random.Random("logsentinel-calibration-benign")
+    benign_lines = generate_normal_traffic(200, datetime(2026, 3, 1, tzinfo=timezone.utc), rng)
+
+    rates = false_alert_rate_per_1000(model, benign_lines, thresholds=[_ML_THRESHOLD])
+    assert rates[_ML_THRESHOLD] <= _ML_THRESHOLD_FALSE_ALERT_CEILING
+
+
+def test_calibrated_threshold_still_catches_every_attack_type():
+    from logsentinel.detection.features import extract_features
+    from logsentinel.detection.ml import score_at_threshold
+    from logsentinel.evaluation import train_baseline
+    from logsentinel.generator import to_log_text
+    from logsentinel.parser import parse_lines
+
+    model = train_baseline(seed=1000)
+    lines = generate_dataset(normal_count=100, seed=42)
+    entries, _ = parse_lines(to_log_text(lines).splitlines())
+    features = extract_features(entries)
+
+    flagged = score_at_threshold(model, features, _ML_THRESHOLD)
+    flagged_ips = {a.ip for a in flagged}
+    true_ips = {ll.ip for ll in lines if ll.label != "normal"}
+
+    recall = len(flagged_ips & true_ips) / len(true_ips) if true_ips else 0.0
+    assert recall >= _ML_THRESHOLD_RECALL_FLOOR
 
 
 def test_rule_detectors_maintain_perfect_precision_and_recall():

@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from logsentinel.detection.features import extract_features
 from logsentinel.detection.ml import score_at_threshold, score_windows, train_model
 from logsentinel.detection.rules import run_all_rules
-from logsentinel.generator import LabeledLine, generate_normal_traffic, to_log_text
+from logsentinel.generator import Incident, LabeledLine, generate_normal_traffic, to_log_text
 from logsentinel.parser import LogEntry, parse_lines
 
 
@@ -49,21 +49,19 @@ def _compute_metrics(flagged_ips: set[str], true_ips: set[str], all_ips: set[str
     return Metrics(precision, recall, f1, tp, fp, fn)
 
 
+def _baseline_traffic(seed: int, normal_count: int = 200) -> list[LabeledLine]:
+    base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rng = random.Random(f"logsentinel-baseline-v1:{seed}")
+    return generate_normal_traffic(normal_count, base_time, rng)
+
+
 def train_baseline(
     window_seconds: int = 60,
     normal_count: int = 200,
     seed: int = 1000,
     contamination: float | str = "auto",
 ):
-    """Train an Isolation Forest on independently-generated, purely-normal
-    traffic. The RNG is seeded with a composite key (a tuple), not a bare
-    int, so it cannot collide with a plain-int seed a caller picks for a
-    test fixture elsewhere, even if both use the literal value 1000. This
-    is what actually guarantees independence from the batch being scored,
-    not just a convention of "pick different numbers.\""""
-    base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    rng = random.Random(f"logsentinel-baseline-v1:{seed}")
-    normal_lines = generate_normal_traffic(normal_count, base_time, rng)
+    normal_lines = _baseline_traffic(seed, normal_count)
     entries, _ = parse_lines(to_log_text(normal_lines).splitlines())
     features = extract_features(entries, window_seconds=window_seconds)
 
@@ -209,3 +207,74 @@ def evaluate_rules_combined(entries: list[LogEntry], lines: list[LabeledLine]) -
     all_ips = {e.ip for e in entries}
 
     return _compute_metrics(flagged_ips, true_ips, all_ips)
+
+def _alert_overlaps_incident(start: datetime, end: datetime, incident: Incident) -> bool:
+    return start < incident.end and end > incident.start
+
+
+def evaluate_incidents(
+    entries: list[LogEntry],
+    incidents: list[Incident],
+    model,
+    window_seconds: int = 60,
+) -> dict[str, dict]:
+    """For each ground-truth incident, check whether rules, ML, or hybrid
+    flagged THIS incident specifically — matching by IP and overlapping
+    time window — rather than crediting an IP for every incident it was
+    ever part of."""
+    rule_alerts = run_all_rules(entries)
+    features = extract_features(entries, window_seconds=window_seconds)
+    ml_alerts = score_windows(model, features) if features else []
+
+    def _ml_span(a) -> tuple[datetime, datetime]:
+        start = datetime.fromisoformat(a.window_start)
+        return start, start + timedelta(seconds=window_seconds)
+
+    def _caught_by_rules(incident: Incident) -> bool:
+        return any(
+            a.ip == incident.ip
+            and a.window_start is not None
+            and _alert_overlaps_incident(a.window_start, a.window_end, incident)
+            for a in rule_alerts
+        )
+
+    def _caught_by_ml(incident: Incident) -> bool:
+        return any(
+            a.ip == incident.ip and _alert_overlaps_incident(*_ml_span(a), incident)
+            for a in ml_alerts
+        )
+
+    results = {}
+    for name, caught_fn in (
+        ("rules_combined", _caught_by_rules),
+        ("ml", _caught_by_ml),
+        ("hybrid", lambda inc: _caught_by_rules(inc) or _caught_by_ml(inc)),
+    ):
+        total = len(incidents)
+        caught = sum(1 for inc in incidents if caught_fn(inc))
+        results[name] = {
+            "incidents_total": total,
+            "incidents_caught": caught,
+            "incident_recall": (caught / total) if total else 0.0,
+        }
+    return results
+
+
+def run_full_evaluation_with_incidents(
+    lines: list[LabeledLine],
+    incidents: list[Incident],
+    window_seconds: int = 60,
+    baseline_seed: int = 1000,
+) -> dict:
+    """run_full_evaluation plus incident-level recall."""
+    results = run_full_evaluation(lines, window_seconds=window_seconds, baseline_seed=baseline_seed)
+    entries, _ = parse_lines(to_log_text(lines).splitlines())
+    if not entries or not incidents:
+        results["incidents"] = {}
+        return results
+
+    model = train_baseline(window_seconds=window_seconds, seed=baseline_seed)
+    results["incidents"] = evaluate_incidents(
+        entries, incidents, model, window_seconds=window_seconds
+    )
+    return results

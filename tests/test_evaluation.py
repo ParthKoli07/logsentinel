@@ -124,3 +124,51 @@ def test_false_alert_rate_per_1000_on_held_out_benign_data():
     assert set(rates.keys()) == {-0.1, 0.0, 0.1}
     # A higher (less negative) threshold should flag at least as many windows.
     assert rates[0.1] >= rates[-0.1]
+
+def test_baseline_traffic_does_not_collide_with_a_plain_int_test_seed():
+    """Calls the REAL _baseline_traffic() used by train_baseline(), so
+    reverting the string-seed fix would make this test fail for real."""
+    import random
+    from datetime import datetime, timezone
+
+    from logsentinel.evaluation import _baseline_traffic
+    from logsentinel.generator import generate_normal_traffic
+
+    baseline_lines = _baseline_traffic(seed=1000, normal_count=50)
+
+    colliding_rng = random.Random(1000)
+    test_lines = generate_normal_traffic(
+        50, datetime(2026, 6, 1, tzinfo=timezone.utc), colliding_rng
+    )
+
+    def _strip_timestamp(line: str) -> str:
+        return line.split("]", 1)[1] if "]" in line else line
+
+    baseline_bodies = {_strip_timestamp(ll.line) for ll in baseline_lines}
+    test_bodies = {_strip_timestamp(ll.line) for ll in test_lines}
+    overlap = baseline_bodies & test_bodies
+    assert len(overlap) < len(baseline_bodies) * 0.5
+
+
+def test_evaluate_incidents_reports_recall_for_each_approach():
+    from logsentinel.evaluation import evaluate_incidents, train_baseline
+    from logsentinel.generator import generate_dataset_with_incidents
+
+    lines, incidents = generate_dataset_with_incidents(normal_count=50, seed=2)
+    entries, _ = parse_lines(to_log_text(lines).splitlines())
+    model = train_baseline(seed=1000)
+
+    results = evaluate_incidents(entries, incidents, model)
+    assert set(results.keys()) == {"rules_combined", "ml", "hybrid"}
+    for info in results.values():
+        assert info["incidents_total"] == len(incidents)
+
+
+def test_run_full_evaluation_with_incidents_includes_incident_key():
+    from logsentinel.evaluation import run_full_evaluation_with_incidents
+    from logsentinel.generator import generate_dataset_with_incidents
+
+    lines, incidents = generate_dataset_with_incidents(normal_count=30, seed=3)
+    results = run_full_evaluation_with_incidents(lines, incidents)
+    assert "incidents" in results
+    assert "hybrid" in results["incidents"]
