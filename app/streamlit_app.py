@@ -66,7 +66,26 @@ if entries and can(role, "upload_logs"):
         from logsentinel.storage import save_batch
 
         batch_id = save_batch(sb_client, st.user.email, uploaded.name, entries, malformed)
+        st.session_state["batch_id"] = batch_id
         st.success(f"Saved batch {batch_id}")
+
+    from logsentinel.detection.rules import run_all_rules
+
+    rule_alerts = run_all_rules(entries)
+    if rule_alerts:
+        st.warning(f"⚠️ {len(rule_alerts)} potential threat(s) detected in this batch.")
+        if st.button("Save alerts to the database"):
+            if "batch_id" not in st.session_state:
+                st.error("Save the batch first, then save alerts.")
+            else:
+                from logsentinel.alerts import save_alerts
+
+                count = save_alerts(
+                    sb_client, st.session_state["batch_id"], rule_alerts, st.user.email
+                )
+                st.success(f"Saved {count} alert(s).")
+
+col1, col2 = st.columns(2)
 
 col1, col2 = st.columns(2)
 col1.metric("Parsed lines", len(entries))
