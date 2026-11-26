@@ -248,3 +248,41 @@ def test_one_of_two_same_ip_incidents_can_remain_missed():
 
     assert caught is True
     assert missed is False
+
+def test_two_same_type_incidents_in_one_bucket_only_credit_the_one_with_real_evidence():
+    """Regression for the reported edge case: an alert must not credit a
+    second same-type incident on the same IP just because that incident's
+    time falls inside the detection bucket — only an incident whose
+    timestamps overlap the alert's actual (tight) evidence span should be
+    credited."""
+    from datetime import timedelta
+
+    from logsentinel.detection.rules import Alert
+    from logsentinel.evaluation import _rule_alert_matches_incident
+    from logsentinel.generator import Incident
+
+    ip = "192.0.2.50"
+    t0 = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
+
+    # Tight evidence: the alert's real triggering requests span only 3s.
+    alert = Alert(
+        ip=ip,
+        rule="scan",
+        severity="medium",
+        detail="scan",
+        window_start=t0,
+        window_end=t0 + timedelta(seconds=3),
+    )
+
+    real_incident = Incident(ip=ip, label="scan", start=t0, end=t0 + timedelta(seconds=5))
+    # Falls inside the OLD, artificially wide 600s bucket window, but NOT
+    # inside the alert's real evidence span — must not be credited.
+    other_incident_same_bucket = Incident(
+        ip=ip,
+        label="scan",
+        start=t0 + timedelta(seconds=300),
+        end=t0 + timedelta(seconds=305),
+    )
+
+    assert _rule_alert_matches_incident(alert, real_incident) is True
+    assert _rule_alert_matches_incident(alert, other_incident_same_bucket) is False

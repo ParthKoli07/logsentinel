@@ -106,3 +106,23 @@ def test_benign_traffic_burst_does_not_trigger_any_rule():
     lines = generate_benign_traffic_burst(datetime(2026, 1, 1, tzinfo=timezone.utc), rng)
     entries, _ = parse_lines(to_log_text(lines).splitlines())
     assert run_all_rules(entries) == []
+
+def test_scan_alert_evidence_window_is_tight_not_full_bucket():
+    """The alert's window must reflect the actual timestamps of the
+    sensitive-path hits that triggered it, not the full 600-second
+    detection bucket — otherwise two separate same-type incidents inside
+    one bucket could both appear to overlap a single alert."""
+    import random
+    from datetime import datetime, timezone
+
+    from logsentinel.generator import generate_scan, to_log_text
+
+    rng = random.Random(11)
+    base = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
+    scan_lines = generate_scan(base, rng)
+    entries, _ = parse_lines(to_log_text(scan_lines).splitlines())
+
+    alerts = detect_scanning(entries, window_seconds=600)
+    assert len(alerts) == 1
+    span = (alerts[0].window_end - alerts[0].window_start).total_seconds()
+    assert span < 30

@@ -28,26 +28,28 @@ class Alert:
 def detect_brute_force(
     entries: list[LogEntry], threshold: int = 5, window_seconds: int = 600
 ) -> list[Alert]:
-    """Flag (ip, window) pairs with >= threshold failed logins. Windowing
-    means two brute-force bursts from the same IP, separated in time,
-    produce two separate alerts rather than being merged into one."""
-    buckets: dict[tuple[str, datetime], int] = defaultdict(int)
+    """Flag (ip, window) pairs with >= threshold failed logins. The alert's
+    window_start/window_end reflect the actual timestamps of the triggering
+    requests, not the full detection bucket, so a same-type incident that
+    merely falls inside the same wide bucket (without contributing any
+    evidence) is not wrongly credited."""
+    buckets: dict[tuple[str, datetime], list[datetime]] = defaultdict(list)
     for e in entries:
         if e.status == 401 and e.path and "login" in e.path.lower():
             key = (e.ip, _window_start(e.timestamp, window_seconds))
-            buckets[key] += 1
+            buckets[key].append(e.timestamp)
 
     alerts = []
-    for (ip, window_start), count in buckets.items():
-        if count >= threshold:
+    for (ip, _bucket), timestamps in buckets.items():
+        if len(timestamps) >= threshold:
             alerts.append(
                 Alert(
                     ip=ip,
                     rule="brute_force",
                     severity="high",
-                    detail=f"{count} failed login attempts",
-                    window_start=window_start,
-                    window_end=window_start + timedelta(seconds=window_seconds),
+                    detail=f"{len(timestamps)} failed login attempts",
+                    window_start=min(timestamps),
+                    window_end=max(timestamps) + timedelta(seconds=1),
                 )
             )
     return alerts
@@ -56,23 +58,30 @@ def detect_brute_force(
 def detect_scanning(
     entries: list[LogEntry], threshold: int = 3, window_seconds: int = 600
 ) -> list[Alert]:
-    hits: dict[tuple[str, datetime], set[str]] = defaultdict(set)
+    """Flag (ip, window) pairs that hit several distinct sensitive paths.
+    Same evidence-window tightening as detect_brute_force above."""
+    paths_by_key: dict[tuple[str, datetime], set[str]] = defaultdict(set)
+    timestamps_by_key: dict[tuple[str, datetime], list[datetime]] = defaultdict(list)
+
     for e in entries:
         if e.path and e.path in _SENSITIVE_PATHS:
             key = (e.ip, _window_start(e.timestamp, window_seconds))
-            hits[key].add(e.path)
+            paths_by_key[key].add(e.path)
+            timestamps_by_key[key].append(e.timestamp)
 
     alerts = []
-    for (ip, window_start), paths in hits.items():
+    for key, paths in paths_by_key.items():
         if len(paths) >= threshold:
+            ip, _bucket = key
+            timestamps = timestamps_by_key[key]
             alerts.append(
                 Alert(
                     ip=ip,
                     rule="scan",
                     severity="medium",
                     detail=f"probed {len(paths)} sensitive paths: {', '.join(sorted(paths))}",
-                    window_start=window_start,
-                    window_end=window_start + timedelta(seconds=window_seconds),
+                    window_start=min(timestamps),
+                    window_end=max(timestamps) + timedelta(seconds=1),
                 )
             )
     return alerts
