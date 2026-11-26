@@ -3,9 +3,11 @@ against ground-truth labels from the synthetic generator.
 
 ML is trained on an independently-generated, purely-normal baseline and
 scored against a separate test batch, rather than fitting and scoring the
-same data. Fitting and scoring identical data would measure how the model
-ranks the batch it already memorized, not how well it generalizes to new
-traffic, which is not a meaningful evaluation of detection quality."""
+same data. The ML decision threshold is calibrated separately (see
+tests/test_regression.py) and used consistently here, for both IP-level
+and incident-level scoring, rather than falling back to the model's
+default contamination-based cutoff in some places and the calibrated
+cutoff in others."""
 
 from __future__ import annotations
 
@@ -15,9 +17,17 @@ from datetime import datetime, timedelta, timezone
 
 from logsentinel.detection.features import extract_features
 from logsentinel.detection.ml import score_at_threshold, score_windows, train_model
-from logsentinel.detection.rules import run_all_rules
+from logsentinel.detection.rules import Alert, run_all_rules
 from logsentinel.generator import Incident, LabeledLine, generate_normal_traffic, to_log_text
 from logsentinel.parser import LogEntry, parse_lines
+
+# Calibrated on a held-out benign dataset (see
+# test_calibrated_threshold_keeps_false_alerts_low_on_held_out_benign_data):
+# at -0.10 this cuts false alerts from ~296 to ~75 per 1000 benign windows
+# while keeping full attack recall. Used as the single source of truth for
+# the ML cutoff everywhere in this module, so the CLI script and the
+# regression tests are never silently out of sync.
+DEFAULT_ML_THRESHOLD = -0.10
 
 
 @dataclass(frozen=True)
@@ -61,6 +71,10 @@ def train_baseline(
     seed: int = 1000,
     contamination: float | str = "auto",
 ):
+    """Train an Isolation Forest on independently-generated, purely-normal
+    traffic. The RNG is seeded with a string key, not a bare int, so it
+    cannot collide with a plain-int seed a caller picks for a test fixture
+    elsewhere, even if both literally use 1000."""
     normal_lines = _baseline_traffic(seed, normal_count)
     entries, _ = parse_lines(to_log_text(normal_lines).splitlines())
     features = extract_features(entries, window_seconds=window_seconds)
@@ -87,15 +101,37 @@ def evaluate_rules(entries: list[LogEntry], lines: list[LabeledLine]) -> dict[st
     return results
 
 
+def evaluate_rules_combined(entries: list[LogEntry], lines: list[LabeledLine]) -> Metrics:
+    """Treat all rule-based detectors as one system: did ANY rule flag this
+    IP, versus did this IP actually perform ANY attack."""
+    if not entries:
+        return _EMPTY_METRICS
+
+    alerts = run_all_rules(entries)
+    flagged_ips = {a.ip for a in alerts}
+    true_ips = {ll.ip for ll in lines if ll.label != "normal"}
+    all_ips = {e.ip for e in entries}
+
+    return _compute_metrics(flagged_ips, true_ips, all_ips)
+
+
+def _score_ml(model, features, ml_threshold: float | None):
+    """Score feature windows at the calibrated threshold when one is given,
+    otherwise fall back to the model's own contamination-based cutoff."""
+    if ml_threshold is None:
+        return score_windows(model, features)
+    return score_at_threshold(model, features, ml_threshold)
+
+
 def evaluate_ml(
     entries: list[LogEntry],
     lines: list[LabeledLine],
     model,
     window_seconds: int = 60,
+    ml_threshold: float | None = DEFAULT_ML_THRESHOLD,
 ) -> Metrics:
     """Precision/recall/F1 for the ML detector, scoring `entries` against an
-    already-trained `model` (see train_baseline) rather than training on
-    `entries` itself."""
+    already-trained `model` at the given calibrated threshold."""
     if not entries:
         return _EMPTY_METRICS
 
@@ -103,7 +139,7 @@ def evaluate_ml(
     if not features:
         return _EMPTY_METRICS
 
-    ml_alerts = score_windows(model, features)
+    ml_alerts = _score_ml(model, features, ml_threshold)
     flagged_ips = {a.ip for a in ml_alerts}
     true_ips = {ll.ip for ll in lines if ll.label != "normal"}
     all_ips = {e.ip for e in entries}
@@ -116,9 +152,10 @@ def evaluate_hybrid(
     lines: list[LabeledLine],
     model,
     window_seconds: int = 60,
+    ml_threshold: float | None = DEFAULT_ML_THRESHOLD,
 ) -> Metrics:
     """Precision/recall/F1 when an IP is flagged if EITHER rules OR the
-    already-trained ML model flags it."""
+    calibrated ML model flags it."""
     if not entries:
         return _EMPTY_METRICS
 
@@ -126,7 +163,7 @@ def evaluate_hybrid(
     rule_ips = {a.ip for a in rule_alerts}
 
     features = extract_features(entries, window_seconds=window_seconds)
-    ml_ips = {a.ip for a in score_windows(model, features)} if features else set()
+    ml_ips = {a.ip for a in _score_ml(model, features, ml_threshold)} if features else set()
 
     flagged_ips = rule_ips | ml_ips
     true_ips = {ll.ip for ll in lines if ll.label != "normal"}
@@ -142,10 +179,7 @@ def false_alert_rate_per_1000(
     window_seconds: int = 60,
 ) -> dict[float, float]:
     """For each decision_function threshold, report how many windows per
-    1000 would be falsely flagged on a HELD-OUT benign dataset, independent
-    from both the training baseline and whatever batch is being evaluated.
-    This answers "how noisy is this model at different sensitivities?",
-    separately from recall/precision against known attacks."""
+    1000 would be falsely flagged on a HELD-OUT benign dataset."""
     entries, _ = parse_lines(to_log_text(benign_lines).splitlines())
     features = extract_features(entries, window_seconds=window_seconds)
     if not features:
@@ -162,12 +196,12 @@ def run_full_evaluation(
     lines: list[LabeledLine],
     window_seconds: int = 60,
     baseline_seed: int = 1000,
+    ml_threshold: float | None = DEFAULT_ML_THRESHOLD,
 ) -> dict:
     """Run rules, ML, and hybrid evaluation on the same test batch, training
-    ML on an independent baseline rather than on this batch itself. Also
-    reports parse coverage (how many lines parsed vs were malformed) so a
-    batch with poor parse coverage doesn't silently produce misleading
-    metrics."""
+    ML on an independent baseline and scoring it at the calibrated
+    threshold. Reports parse coverage and the threshold used, so a report
+    or printout can state exactly what cutoff produced these numbers."""
     entries, malformed = parse_lines(to_log_text(lines).splitlines())
 
     if not entries:
@@ -179,6 +213,7 @@ def run_full_evaluation(
             "hybrid": _EMPTY_METRICS,
             "parsed_lines": 0,
             "malformed_lines": malformed,
+            "ml_threshold": ml_threshold,
         }
 
     model = train_baseline(window_seconds=window_seconds, seed=baseline_seed)
@@ -186,29 +221,41 @@ def run_full_evaluation(
     return {
         "rules": evaluate_rules(entries, lines),
         "rules_combined": evaluate_rules_combined(entries, lines),
-        "ml": evaluate_ml(entries, lines, model, window_seconds=window_seconds),
-        "hybrid": evaluate_hybrid(entries, lines, model, window_seconds=window_seconds),
+                "ml": evaluate_ml(
+            entries, lines, model, window_seconds=window_seconds, ml_threshold=ml_threshold
+        ),
+        "hybrid": evaluate_hybrid(
+            entries, lines, model, window_seconds=window_seconds, ml_threshold=ml_threshold
+        ),
         "parsed_lines": len(entries),
         "malformed_lines": malformed,
+        "ml_threshold": ml_threshold,
     }
 
-def evaluate_rules_combined(entries: list[LogEntry], lines: list[LabeledLine]) -> Metrics:
-    """Treat all rule-based detectors as one system: did ANY rule flag this
-    IP, versus did this IP actually perform ANY attack. This is the correct
-    baseline to compare hybrid against, not the max of three separate
-    per-type numbers, which overstates what rules-only actually achieves
-    when a single IP could be missed by one rule but caught by another."""
-    if not entries:
-        return _EMPTY_METRICS
 
-    alerts = run_all_rules(entries)
-    flagged_ips = {a.ip for a in alerts}
-    true_ips = {ll.ip for ll in lines if ll.label != "normal"}
-    all_ips = {e.ip for e in entries}
+def _rule_alert_matches_incident(alert: Alert, incident: Incident) -> bool:
+    """A rule alert can only credit an incident of the SAME attack type, at
+    the same IP, with an overlapping time window. Matching by IP and time
+    alone let a scan alert wrongly credit an unrelated SQLi incident that
+    happened to share an IP, since the synthetic scan and SQLi generators
+    both draw from the same IP pool and can coincidentally collide."""
+    if alert.ip != incident.ip:
+        return False
+    if alert.rule != incident.label:
+        return False
+    if alert.window_start is None or alert.window_end is None:
+        return False
+    return alert.window_start < incident.end and alert.window_end > incident.start
 
-    return _compute_metrics(flagged_ips, true_ips, all_ips)
 
-def _alert_overlaps_incident(start: datetime, end: datetime, incident: Incident) -> bool:
+def _ml_alert_matches_incident(alert, incident: Incident, window_seconds: int) -> bool:
+    """ML carries no attack-type label, so it can only be matched by IP and
+    time overlap. This is intentionally looser than rule matching, and
+    reflects a genuine limitation of the unsupervised model, not a bug."""
+    if alert.ip != incident.ip:
+        return False
+    start = datetime.fromisoformat(alert.window_start)
+    end = start + timedelta(seconds=window_seconds)
     return start < incident.end and end > incident.start
 
 
@@ -217,32 +264,21 @@ def evaluate_incidents(
     incidents: list[Incident],
     model,
     window_seconds: int = 60,
+    ml_threshold: float | None = DEFAULT_ML_THRESHOLD,
 ) -> dict[str, dict]:
     """For each ground-truth incident, check whether rules, ML, or hybrid
-    flagged THIS incident specifically — matching by IP and overlapping
-    time window — rather than crediting an IP for every incident it was
-    ever part of."""
+    flagged THIS incident specifically, matching by IP, attack type (for
+    rules), and overlapping time window, rather than crediting an IP for
+    every incident it was ever part of."""
     rule_alerts = run_all_rules(entries)
     features = extract_features(entries, window_seconds=window_seconds)
-    ml_alerts = score_windows(model, features) if features else []
-
-    def _ml_span(a) -> tuple[datetime, datetime]:
-        start = datetime.fromisoformat(a.window_start)
-        return start, start + timedelta(seconds=window_seconds)
+    ml_alerts = _score_ml(model, features, ml_threshold) if features else []
 
     def _caught_by_rules(incident: Incident) -> bool:
-        return any(
-            a.ip == incident.ip
-            and a.window_start is not None
-            and _alert_overlaps_incident(a.window_start, a.window_end, incident)
-            for a in rule_alerts
-        )
+        return any(_rule_alert_matches_incident(a, incident) for a in rule_alerts)
 
     def _caught_by_ml(incident: Incident) -> bool:
-        return any(
-            a.ip == incident.ip and _alert_overlaps_incident(*_ml_span(a), incident)
-            for a in ml_alerts
-        )
+        return any(_ml_alert_matches_incident(a, incident, window_seconds) for a in ml_alerts)
 
     results = {}
     for name, caught_fn in (
@@ -265,9 +301,16 @@ def run_full_evaluation_with_incidents(
     incidents: list[Incident],
     window_seconds: int = 60,
     baseline_seed: int = 1000,
+    ml_threshold: float | None = DEFAULT_ML_THRESHOLD,
 ) -> dict:
-    """run_full_evaluation plus incident-level recall."""
-    results = run_full_evaluation(lines, window_seconds=window_seconds, baseline_seed=baseline_seed)
+    """run_full_evaluation plus incident-level recall, using the same
+    calibrated ML threshold for both."""
+    results = run_full_evaluation(
+        lines,
+        window_seconds=window_seconds,
+        baseline_seed=baseline_seed,
+        ml_threshold=ml_threshold,
+    )
     entries, _ = parse_lines(to_log_text(lines).splitlines())
     if not entries or not incidents:
         results["incidents"] = {}
@@ -275,6 +318,6 @@ def run_full_evaluation_with_incidents(
 
     model = train_baseline(window_seconds=window_seconds, seed=baseline_seed)
     results["incidents"] = evaluate_incidents(
-        entries, incidents, model, window_seconds=window_seconds
+        entries, incidents, model, window_seconds=window_seconds, ml_threshold=ml_threshold
     )
     return results

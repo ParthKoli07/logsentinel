@@ -12,6 +12,7 @@ from logsentinel.generator import generate_dataset_with_incidents
 lines, incidents = generate_dataset_with_incidents(normal_count=100, seed=42)
 results = run_full_evaluation_with_incidents(lines, incidents)
 
+print(f"ML threshold used: {results['ml_threshold']}")
 print(f"Parsed lines: {results['parsed_lines']}, malformed: {results['malformed_lines']}")
 print()
 

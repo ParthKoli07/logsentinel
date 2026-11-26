@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from logsentinel.evaluation import (
     evaluate_hybrid,
     evaluate_ml,
@@ -97,7 +99,8 @@ def test_run_full_evaluation_returns_all_three_approaches_and_parse_coverage():
     lines = generate_dataset(normal_count=30, seed=9)
     results = run_full_evaluation(lines)
     assert set(results.keys()) == {
-        "rules", "rules_combined", "ml", "hybrid", "parsed_lines", "malformed_lines"
+        "rules", "rules_combined", "ml", "hybrid",
+        "parsed_lines", "malformed_lines", "ml_threshold",
     }
     assert set(results["rules"].keys()) == {"brute_force", "scan", "sqli"}
     assert results["parsed_lines"] > 0
@@ -172,3 +175,76 @@ def test_run_full_evaluation_with_incidents_includes_incident_key():
     results = run_full_evaluation_with_incidents(lines, incidents)
     assert "incidents" in results
     assert "hybrid" in results["incidents"]
+
+def test_rule_alert_does_not_credit_a_different_incident_type_on_same_ip():
+    """Reproduces the exact bug Codex found: the synthetic scan and SQLi
+    generators draw IPs from the same pool and can coincidentally collide.
+    A scan alert must never credit a same-IP SQLi incident just because
+    their time windows happen to overlap."""
+    from datetime import timedelta
+
+    from logsentinel.detection.rules import Alert
+    from logsentinel.evaluation import _rule_alert_matches_incident
+    from logsentinel.generator import Incident
+
+    ip = "192.0.2.77"
+    t0 = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
+
+    scan_alert = Alert(
+        ip=ip,
+        rule="scan",
+        severity="medium",
+        detail="scan",
+        window_start=t0,
+        window_end=t0 + timedelta(seconds=600),
+    )
+    scan_incident = Incident(ip=ip, label="scan", start=t0, end=t0 + timedelta(seconds=5))
+    sqli_incident = Incident(
+        ip=ip, label="sqli", start=t0 + timedelta(seconds=30), end=t0 + timedelta(seconds=35)
+    )
+
+    assert _rule_alert_matches_incident(scan_alert, scan_incident) is True
+    assert _rule_alert_matches_incident(scan_alert, sqli_incident) is False
+
+
+
+def test_one_of_two_same_ip_incidents_can_remain_missed():
+    """Two incidents on the same IP, same attack type. Only the first has
+    a real corresponding alert. Matching must not credit the second one
+    just because it shares an IP (and type) with a caught incident — the
+    default fixture has 7 distinct attacker IPs and can't expose this, so
+    this test builds the scenario directly."""
+    from datetime import timedelta
+
+    from logsentinel.detection.rules import Alert
+    from logsentinel.evaluation import _rule_alert_matches_incident
+    from logsentinel.generator import Incident
+
+    ip = "192.0.2.90"
+    t0 = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
+
+    caught_incident = Incident(ip=ip, label="scan", start=t0, end=t0 + timedelta(seconds=5))
+    missed_incident = Incident(
+        ip=ip,
+        label="scan",
+        start=t0 + timedelta(hours=2),
+        end=t0 + timedelta(hours=2, seconds=5),
+    )
+
+    # Only one alert exists, covering just the first incident's window.
+    fabricated_alerts = [
+        Alert(
+            ip=ip,
+            rule="scan",
+            severity="medium",
+            detail="scan",
+            window_start=t0,
+            window_end=t0 + timedelta(seconds=600),
+        )
+    ]
+
+    caught = any(_rule_alert_matches_incident(a, caught_incident) for a in fabricated_alerts)
+    missed = any(_rule_alert_matches_incident(a, missed_incident) for a in fabricated_alerts)
+
+    assert caught is True
+    assert missed is False
