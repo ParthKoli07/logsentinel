@@ -78,6 +78,19 @@ if submitted:
         st.rerun()
     except ValueError as exc:
         st.error(str(exc))
+        update_rule_config(sb_client, new_config, st.user.email)
+        from logsentinel.audit import log_action
+        log_action(
+            sb_client,
+            st.user.email,
+            "update_rule_config",
+            (
+                f"bf={new_config.brute_force_threshold} "
+                f"scan={new_config.scan_threshold} win={new_config.window_seconds}"
+            ),
+        )
+        st.success("Configuration saved.")
+        st.rerun()
 
 st.divider()
 st.subheader("Current configuration")

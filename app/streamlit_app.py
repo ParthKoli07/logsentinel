@@ -84,6 +84,13 @@ if entries and can(role, "upload_logs"):
                     sb_client, st.session_state["batch_id"], rule_alerts, st.user.email
                 )
                 st.success(f"Saved {count} alert(s).")
+                count = save_alerts(
+                sb_client, st.session_state["batch_id"], rule_alerts, st.user.email
+            )
+            st.success(f"Saved {count} alert(s).")
+
+            from logsentinel.audit import log_action
+            log_action(sb_client, st.user.email, "save_alerts", f"{count} alerts")
 
 col1, col2 = st.columns(2)
 
