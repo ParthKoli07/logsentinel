@@ -119,3 +119,16 @@ def _window_start(ts: datetime, window_seconds: int) -> datetime:
     epoch_seconds = int(ts.timestamp())
     bucket_start = epoch_seconds - (epoch_seconds % window_seconds)
     return datetime.fromtimestamp(bucket_start, tz=ts.tzinfo)
+
+def run_all_rules_with_config(entries: list[LogEntry], config) -> list[Alert]:
+    """Like run_all_rules, but using thresholds and window size from a
+    RuleConfig instead of hardcoded defaults."""
+    alerts: list[Alert] = []
+    alerts += detect_brute_force(
+        entries, threshold=config.brute_force_threshold, window_seconds=config.window_seconds
+    )
+    alerts += detect_scanning(
+        entries, threshold=config.scan_threshold, window_seconds=config.window_seconds
+    )
+    alerts += detect_sqli(entries)
+    return alerts

@@ -3,6 +3,7 @@ from logsentinel.detection.rules import (
     detect_scanning,
     detect_sqli,
     run_all_rules,
+    run_all_rules_with_config,
 )
 from logsentinel.generator import generate_dataset, to_log_text
 from logsentinel.parser import parse_lines
@@ -126,3 +127,17 @@ def test_scan_alert_evidence_window_is_tight_not_full_bucket():
     assert len(alerts) == 1
     span = (alerts[0].window_end - alerts[0].window_start).total_seconds()
     assert span < 30
+
+def test_run_all_rules_with_config_uses_custom_thresholds():
+    from logsentinel.rule_config import RuleConfig
+
+    entries = _parsed_dataset()
+    loose_config = RuleConfig(brute_force_threshold=100, scan_threshold=100, window_seconds=600)
+    alerts = run_all_rules_with_config(entries, loose_config)
+
+    # With thresholds set absurdly high, brute_force and scan should no
+    # longer fire, proving the config values are actually being used.
+    rules_seen = {a.rule for a in alerts}
+    assert "brute_force" not in rules_seen
+    assert "scan" not in rules_seen
+    assert "sqli" in rules_seen  # sqli is signature-based, unaffected by thresholds
